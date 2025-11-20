@@ -1,158 +1,122 @@
-# Synthetic Data Output Schema (Required for Evaluation Pipeline)
+# Synthetic Data Output Schema (Required Format for Evaluation)
 
-This document specifies the **exact output format** required for all synthetic data generation models (GReaT, diffusion baselines, random-walk method, etc.).  
-All teams **must** follow this schema so the shared evaluation pipeline (Wasserstein distance, classifier p-test, multi-hot encoding) can run correctly.
-
-If your synthetic data does not follow this format, **the evaluation will fail**.
+This document defines the exact output format that all baseline models must follow when generating synthetic visit-level data. The evaluation pipeline expects a **processed per-visit CSV** with a specific camelCase schema. Your synthetic output must match this schema exactly.
 
 ---
 
-## 1. Required Output File
+## 1. Output File
 
-Each method must output a **single CSV file** containing synthetic visit-fact rows.
+Each model must produce a single CSV file containing **one row per synthetic visit**.
 
 **Example filename:**
+synth_visits_processed.csv
 
 
 ---
 
-## 2. Required Table Structure
+## 2. Required Columns (Names Must Match Exactly)
 
-Each row in the CSV must represent **one feature occurring in one visit**.
+Your CSV must contain the following columns:
 
-This is a **long format** table (not wide).
+| Column Name             | Description |
+|-------------------------|-------------|
+| `visitID`               | Unique identifier for each synthetic visit. Must not be null. |
+| `personID`              | Patient identifier for the visit. May be null. |
+| `providerID`            | Provider identifier for the visit. May be null. |
+| `drug_concept_ids`      | A list of drug concept IDs associated with the visit. May be empty or null. |
+| `condition_concept_ids` | A list of condition concept IDs associated with the visit. May be empty or null. |
 
-### Required Columns (names must match exactly)
-
-| Column name     | Type        | Description |
-|-----------------|-------------|-------------|
-| `visit_id`      | string/int  | Unique ID for each synthetic visit. |
-| `person_id`     | string/int  | Patient ID for the visit (can be reused or sampled from real data). |
-| `provider_id`   | string/int  | Provider associated with the feature. Must come from the real provider ID space. |
-| `feature_type`  | string      | Category of the feature (must match real categories exactly, e.g., `"DRUG"`, `"COND"`). |
-| `concept_id`    | string/int  | Code/identifier of the feature. Must be drawn from real data concept IDs. |
-
-### Extra Columns  
-You may include additional columns (e.g., `value`, `dose`, `timestamp`).  
-**These will be ignored by the evaluator.**
+These five columns must appear exactly as written.
 
 ---
 
-## 3. Semantics of Each Row
+## 3. Column Rules
 
-Each row must encode:
+### `visitID`
+- Must be present and non-null.
+- Should uniquely represent a synthetic visit.
+- Evaluation assumes one row per visit.
 
-> **(visit_id, feature)** where the feature is defined by `(feature_type, concept_id)`.
+### `personID`
+- Allowed to be null.
+- Null indicates the model did not assign a patient.
 
-Example:
+### `providerID`
+- Allowed to be null.
+- Null indicates the model did not assign a provider.
+
+### `drug_concept_ids` and `condition_concept_ids`
+- Represent lists of concept IDs in string form.
+- Allowed to be empty or null.
+- The following separators are all acceptable:
+
+"111 222 333"
+"111;222;333"
+"111,222,333"
+"111|222|333"
 
 
----
-
-## 4. Allowed Values for `feature_type`
-
-Must match real data exactly. Common values include:
-
-- `DRUG` — medication
-- `COND` — condition/diagnosis
-- `PROC` — procedure
-- `SPEC` — provider specialty (optional)
-- `DEMO_*` — demographic features (optional)
-- `LAB` — lab measurements (optional)
-
-Do **not** invent new category labels.
-
----
-
-## 5. Allowed Values for `concept_id`
-
-`concept_id` values must be drawn from the **real dataset’s concept vocabulary**.
-
-- No new IDs.
-- No random IDs.
-- No new invented concepts.
-
-This is required to ensure vocabulary alignment during evaluation.
+- These fields may also contain `""`, `" "`, or `null` for visits with no drugs or conditions.
 
 ---
 
-## 6. How the Evaluation Pipeline Uses This Data
+## 4. Required Structure Per Row
 
-Your synthetic CSV is consumed by the evaluation script to:
+Each row of your CSV must represent:
 
-### 1. Build a shared vocabulary  
-Each unique `(feature_type, concept_id)` pair becomes a feature token.
+> A single synthetic visit and all drug/condition concepts associated with that visit.
 
-### 2. Build visit × feature multi-hot matrices  
-Rows represent visits.  
-Columns represent tokens.
-
-### 3. Compute Wasserstein distances  
-The evaluator counts per-visit:
-
-- `#drugs` = number of unique entries where `feature_type == "DRUG"`
-- `#conditions` = number where `feature_type == "COND"`
-
-### 4. Train a classifier for the p-test  
-The model distinguishes real vs synthetic vectors to compute:
-
-- AUC  
-- Accuracy  
-- Approximate p-value
-
-If the CSV follows the schema above, evaluation runs fully automatically.
+This means:
+- One row = one visit.
+- Concept lists belong entirely inside that row.
+- Do not create one row per concept.
 
 ---
 
-## 7. Common Mistakes (Do Not Do)
+## 5. Valid Examples
 
-❌ Do **not** output a wide-format table  
-→ Must use long format (one row per (visit, feature)).
+The following rows demonstrate acceptable formatting:
 
-❌ Do **not** create new feature_type labels  
-→ Must match the real dataset.
-
-❌ Do **not** invent new concept IDs  
-→ Only use real concept IDs.
-
-❌ Do **not** combine multiple features into one row  
-→ Each (visit, feature) pair must be separate.
-
-❌ Do **not** omit required columns  
-→ All five required columns must be present.
-
----
-
-## 8. Minimal Valid Example
+visitID,personID,providerID,drug_concept_ids,condition_concept_ids
+10001,501,2001,"111;222","9001 9002"
+10002,,2007,"","9001"
+10003,889,,"555|777|888",""
+10004,,,,""
 
 
-This fully satisfies the schema.
+All of the above are valid:
+- Null `personID` or `providerID` is allowed.
+- Empty or null concept lists are allowed.
+- Lists may use any common delimiter.
 
 ---
 
-## 9. Optional Enhancements
+## 6. Format Requirements Summary
 
-You may add any number of optional attributes:
+Your synthetic CSV must:
 
-- timestamps (`start_date`, `end_date`)
-- dosage information
-- lab values
-- demographics
-- sequence/order indicators
-- synthetic provider sampling strategies
+- Use **camelCase** column names exactly as shown.
+- Provide **one row per visit**.
+- Allow null `personID` and `providerID`.
+- Allow null or empty concept ID lists.
+- Store concept lists as a **string**, using any common delimiter.
 
-These **do not affect evaluation** and will be ignored.
+Your synthetic CSV must not:
 
----
-
-## 10. Summary (What Your Model Must Output)
-
-Each model must produce a **synthetic long-format visit-fact CSV** where:
-
-- Each row is **one feature** from **one visit**
-- Required columns:
-- `feature_type` and `concept_id` must match the real dataset’s vocabulary
-
-If you follow this schema, your synthetic data will be directly compatible with the evaluation pipeline.
+- Change column names.
+- Use snake_case or different naming.
+- Spread a visit across multiple rows.
+- Use nested JSON structures.
+- Omit required columns.
 
 ---
+
+## 7. Validation
+
+You can test your file using the validator: method/validate_synth.py
+
+Edit the config block, then run:
+
+```python
+SYNTH_PATH = "../data/synth/synth_visits_processed.csv"
+
