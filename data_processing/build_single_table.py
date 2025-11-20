@@ -15,6 +15,7 @@ Output (to ../data/processed/):
 Each row corresponds to a single visit_occurrence_id and aggregates:
   - person_id           (prefers person from drug table, else condition table)
   - provider_id         (prefers provider from drug table, else condition table)
+  - provider_specialty  (joined from provider.csv, does NOT affect graph/walk)
   - drug_concept_ids    (unique per visit, semicolon-separated)
   - condition_concept_ids (unique per visit, semicolon-separated)
   - n_drugs, n_conditions
@@ -59,6 +60,34 @@ def _aggregate_str_list(series: pd.Series) -> str:
     # convert to string and sort for reproducibility
     vals_str = sorted(str(v) for v in vals)
     return ";".join(vals_str)
+
+
+def build_provider_specialty_view(clean_dir: Path) -> pd.DataFrame:
+    """
+    Build a provider -> specialty lookup from provider.csv.
+
+    Uses 'specialty_source_value' as the specialty column.
+
+    Returns:
+      provider_id, provider_specialty
+    """
+    path = clean_dir / "provider.csv"
+    if not path.exists():
+        print(f"[WARN] {path} not found; provider specialty will be missing.")
+        return pd.DataFrame(columns=["provider_id", "provider_specialty"])
+
+    print(f"[LOAD] {path}")
+    # Adjusted column name here:
+    use_cols = ["provider_id", "specialty_source_value"]
+    df = pd.read_csv(path, usecols=use_cols, low_memory=False)
+
+    # Deduplicate providers
+    df = df.drop_duplicates(subset=["provider_id"]).copy()
+    df = df.rename(columns={"specialty_source_value": "provider_specialty"})
+
+    print(f"[BUILD] provider_specialty view: {len(df):,} providers")
+    return df
+
 
 
 # ---------- Builders ----------
@@ -166,6 +195,7 @@ def build_visit_fact_table(clean_dir: Path,
     """
     visit_drug = build_visit_drug_view(clean_dir)
     visit_cond = build_visit_condition_view(clean_dir)
+    provider_specialty = build_provider_specialty_view(clean_dir)
 
     # Outer merge of visits from drug and condition tables
     print("[MERGE] Combining visit_drug and visit_condition views...")
@@ -200,6 +230,13 @@ def build_visit_fact_table(clean_dir: Path,
         if col in visits.columns:
             visits[col] = visits[col].fillna(0).astype(int)
 
+    # --- NEW: join provider_specialty (does NOT affect graph / walk) ---
+    if not provider_specialty.empty:
+        print("[MERGE] Joining provider_specialty from provider.csv...")
+        visits = visits.merge(provider_specialty, on="provider_id", how="left")
+    else:
+        visits["provider_specialty"] = pd.NA
+
     # Optional: require that all node types are present
     if require_all_node_types:
         print("[FILTER] Enforcing presence of all node types (visit, person, provider, drug, condition)...")
@@ -231,6 +268,7 @@ def build_visit_fact_table(clean_dir: Path,
         "visit_occurrence_id",
         "person_id",
         "provider_id",
+        "provider_specialty",   # NEW: included for evaluation
         "drug_concept_ids",
         "n_drugs",
         "condition_concept_ids",
