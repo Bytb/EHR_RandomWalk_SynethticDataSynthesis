@@ -111,6 +111,54 @@ def attach_provider_specialty(
     df = df.drop(columns=["providerID_str"])
     return df
 
+# ---------------------------------------------------------------------
+# Provider specialty canonicalization
+# ---------------------------------------------------------------------
+
+# Only obvious merges / synonym collapses
+CANONICAL_SPECIALTY_MAP = {
+    # Family / Internal
+    "Family Practice": "Family Medicine",
+    "General Internal Medicine": "Internal Medicine",
+
+    # Endocrinology
+    "Endocrinology, Diabetes, & Metabolism": "Endocrinology",
+    "Endocrinology-General (Endocrinology)": "Endocrinology",
+
+    # Pulmonary
+    "Pulmonology": "Pulmonary Medicine",
+    "Pulmonary Disease": "Pulmonary Medicine",
+    "Pulmonary Medicine-General (Pulmonary Medicine)": "Pulmonary Medicine",
+
+    # Plastic surgery
+    "Plastic Surgery-General (Plastic Surgery)": "Plastic Surgery",
+    "Plastic Surgery-Reconstructive": "Plastic Surgery",
+
+    # Cardiology (example obvious grouping)
+    "Cardiovascular Medicine": "Cardiology",
+    "Cardiovascular Disease": "Cardiology",
+    "Cardiovascular Medicine-Interventional Cardiology": "Interventional Cardiology",
+    "Cardiac Electrophysiology": "Clinical Cardiac Electrophysiology",
+    "Clinical Cardiac Electrophysiology": "Clinical Cardiac Electrophysiology",
+
+    # You can extend this dict later if you want more aggressive merging
+}
+
+
+def canonicalize_specialty(s: Any) -> str:
+    """
+    Map provider_specialty strings to a canonical label.
+
+    - Normalize nan/empty to 'Unknown'
+    - Apply CANONICAL_SPECIALTY_MAP for obvious merges
+    """
+    if pd.isna(s):
+        return "Unknown"
+    s_str = str(s).strip()
+    if s_str == "" or s_str.lower() in {"nan", "none"}:
+        return "Unknown"
+    return CANONICAL_SPECIALTY_MAP.get(s_str, s_str)
+
 
 # ---------------------------------------------------------------------
 # Schema normalization
@@ -119,8 +167,8 @@ def attach_provider_specialty(
 def normalize_real_df(raw_real: pd.DataFrame,
                       provider_map: Dict[str, str]) -> pd.DataFrame:
     """
-    Normalize REAL sampled_visit_facts.csv to a unified camelCase schema and
-    attach provider_specialty from provider.csv via provider_map.
+    Normalize REAL sampled_visit_facts.csv to a unified camelCase schema,
+    attach provider_specialty, and canonicalize specialty labels.
     """
     df = raw_real.copy()
 
@@ -135,7 +183,7 @@ def normalize_real_df(raw_real: pd.DataFrame,
         if col not in df.columns:
             raise ValueError(f"REAL data missing required column '{col}'")
 
-    # Rename IDs to camelCase
+    # Rename to camelCase
     df = df.rename(
         columns={
             "visit_occurrence_id": "visitID",
@@ -144,20 +192,24 @@ def normalize_real_df(raw_real: pd.DataFrame,
         }
     )
 
-    # Normalize providerID (strip trailing '.0')
+    # Normalize providerID (strip trailing ".0")
     df["providerID"] = (
         df["providerID"]
         .astype(str)
         .str.replace(r"\.0$", "", regex=True)
     )
 
-    # Attach provider_specialty using the same map as for SYNTH
+    # Attach provider_specialty using provider.csv mapping
     df = attach_provider_specialty(df, provider_map, provider_col="providerID")
 
-    # Ensure n_drugs / n_conditions exist (not strictly needed for eval)
-    for col in ["n_drugs", "n_conditions"]:
-        if col not in df.columns:
-            df[col] = np.nan
+    # Canonicalize specialty names
+    df["provider_specialty"] = df["provider_specialty"].apply(canonicalize_specialty)
+
+    # Ensure n_drugs / n_conditions exist (may not be present in real input)
+    if "n_drugs" not in df.columns or "n_conditions" not in df.columns:
+        n_drugs, n_conds = compute_counts_from_lists(df)
+        df["n_drugs"] = n_drugs
+        df["n_conditions"] = n_conds
 
     return df[
         [
@@ -176,8 +228,9 @@ def normalize_real_df(raw_real: pd.DataFrame,
 def normalize_synth_df(raw_synth: pd.DataFrame,
                        provider_map: Dict[str, str]) -> pd.DataFrame:
     """
-    Normalize SYNTH rw_synth output to unified camelCase schema and
-    attach provider_specialty via provider_map.
+    Normalize SYNTH rw_synth output to unified camelCase schema,
+    attach provider_specialty, canonicalize specialty labels,
+    and compute #drugs / #conditions.
     """
     df = raw_synth.copy()
 
@@ -192,17 +245,20 @@ def normalize_synth_df(raw_synth: pd.DataFrame,
         if col not in df.columns:
             raise ValueError(f"SYNTH data missing required column '{col}'")
 
-    # Normalize providerID (strip trailing '.0')
+    # Normalize providerID (strip trailing ".0")
     df["providerID"] = (
         df["providerID"]
         .astype(str)
         .str.replace(r"\.0$", "", regex=True)
     )
 
-    # Attach provider_specialty from provider_map
+    # Attach provider_specialty using provider.csv mapping
     df = attach_provider_specialty(df, provider_map, provider_col="providerID")
 
-    # Compute counts from lists
+    # Canonicalize specialty names
+    df["provider_specialty"] = df["provider_specialty"].apply(canonicalize_specialty)
+
+    # Compute number-of-drugs / number-of-conditions from semicolon-separated lists
     n_drugs, n_conds = compute_counts_from_lists(df)
     df["n_drugs"] = n_drugs
     df["n_conditions"] = n_conds
@@ -219,6 +275,7 @@ def normalize_synth_df(raw_synth: pd.DataFrame,
             "n_conditions",
         ]
     ]
+
 
 
 # ---------------------------------------------------------------------
@@ -411,53 +468,76 @@ def evaluate_provider_specialty_utility(
     """
     Predict provider_specialty from multi-hot drug+condition features.
 
-    TRTR = Train on REAL, Test on REAL
-    TSTR = Train on SYNTH, Test on REAL
+    Regimes:
+      - TRTR: train on REAL, test on REAL
+      - TSTR: train on SYNTH, test on REAL
+      - TR+S->R: train on REAL ∪ SYNTH, test on REAL
 
-    Rare specialties (< min_class_size in REAL) are removed for stability.
+    Label handling:
+      - provider_specialty is first canonicalized upstream
+      - Count real data per specialty
+      - Specialties with count < min_class_size in REAL are mapped to 'Other'
+      - 'Unknown' specialties are excluded from the task
     """
-    # Mask Unknown specialties
-    real_mask = (real_df["provider_specialty"] != "Unknown")
-    synth_mask = (synth_df["provider_specialty"] != "Unknown")
+    # Work on copies to avoid mutating original dataframes
+    real_df = real_df.copy()
+    synth_df = synth_df.copy()
+
+    # We assume canonicalize_specialty has already been applied to provider_specialty
+    real_spec = real_df["provider_specialty"].astype(str)
+    synth_spec = synth_df["provider_specialty"].astype(str)
+
+    # Count frequencies in REAL (excluding Unknown)
+    vc = real_spec[real_spec != "Unknown"].value_counts()
+    keep_classes = vc[vc >= min_class_size].index.tolist()
+
+    if len(keep_classes) == 0:
+        print("[WARN] No specialties meet min_class_size in REAL. "
+              "All will be mapped to 'Other' / 'Unknown'. Skipping utility evaluation.")
+        return {}
+
+    # Map rare specialties to 'Other'; keep 'Unknown' as is
+    def map_rare_to_other(s: str) -> str:
+        if s == "Unknown":
+            return "Unknown"
+        return s if s in keep_classes else "Other"
+
+    real_df["provider_specialty_eval"] = real_spec.apply(map_rare_to_other)
+    synth_df["provider_specialty_eval"] = synth_spec.apply(map_rare_to_other)
+
+    # Mask out Unknown for the supervised task
+    real_mask = (real_df["provider_specialty_eval"] != "Unknown")
+    synth_mask = (synth_df["provider_specialty_eval"] != "Unknown")
+
+    if real_mask.sum() == 0 or synth_mask.sum() == 0:
+        print("[WARN] No labeled specialties (after Unknown mapping). "
+              "Skipping utility evaluation.")
+        return {}
 
     real_mask_np = real_mask.to_numpy()
     synth_mask_np = synth_mask.to_numpy()
 
-    if real_mask_np.sum() == 0 or synth_mask_np.sum() == 0:
-        print("[WARN] No known provider_specialty found. Skipping utility evaluation.")
+    # Labels after mapping rare -> Other
+    y_real_raw = real_df.loc[real_mask, "provider_specialty_eval"].astype(str).to_numpy()
+    y_synth_raw = synth_df.loc[synth_mask, "provider_specialty_eval"].astype(str).to_numpy()
+
+    # Known feature matrices
+    X_real_known = X_real[real_mask_np]
+    X_synth_known = X_synth[synth_mask_np]
+
+    # Unique classes present in REAL after mapping
+    unique_real_classes = np.unique(y_real_raw)
+    if len(unique_real_classes) < 2:
+        print("[WARN] Less than 2 specialty classes after mapping. "
+              "Skipping utility evaluation.")
         return {}
 
-    # Filter known-only
-    y_real_raw = real_df.loc[real_mask, "provider_specialty"].astype(str)
-    y_synth_raw = synth_df.loc[synth_mask, "provider_specialty"].astype(str)
-
-    # -----------------------------
-    # Remove rare REAL specialties
-    # -----------------------------
-    vc = y_real_raw.value_counts()
-    keep_classes = vc[vc >= min_class_size].index.tolist()
-
-    if len(keep_classes) < 2:
-        print(f"[WARN] After filtering, only {len(keep_classes)} specialty class(es) remain. "
-              f"Skipping utility evaluation.")
-        return {}
-
-    # Build masks for retained classes
-    keep_real = y_real_raw.isin(keep_classes).to_numpy()
-    keep_synth = y_synth_raw.isin(keep_classes).to_numpy()
-
-    # Apply masks
-    X_real_known = X_real[real_mask_np][keep_real]
-    X_synth_known = X_synth[synth_mask_np][keep_synth]
-
-    y_real = y_real_raw[keep_real].to_numpy()
-    y_synth = y_synth_raw[keep_synth].to_numpy()
-
-    # Encode labels on retained specialties only
+    # Label encoder on union of real + synth (so synth-only classes also get a label)
     le = LabelEncoder()
-    le.fit(np.concatenate([y_real, y_synth]))
-    y_real_enc = le.transform(y_real)
-    y_synth_enc = le.transform(y_synth)
+    le.fit(np.concatenate([y_real_raw, y_synth_raw]))
+
+    y_real_enc = le.transform(y_real_raw)
+    y_synth_enc = le.transform(y_synth_raw)
 
     # -----------------------------
     # TRTR: train on REAL, test on REAL
@@ -479,6 +559,8 @@ def evaluate_provider_specialty_utility(
     yr_pred_trtr = clf_trtr.predict(Xr_test)
 
     macro_f1_trtr = f1_score(yr_test, yr_pred_trtr, average="macro")
+    micro_f1_trtr = f1_score(yr_test, yr_pred_trtr, average="micro")
+
     report_trtr = classification_report(
         yr_test,
         yr_pred_trtr,
@@ -499,6 +581,8 @@ def evaluate_provider_specialty_utility(
     yr_pred_tstr = clf_tstr.predict(Xr_test)
 
     macro_f1_tstr = f1_score(yr_test, yr_pred_tstr, average="macro")
+    micro_f1_tstr = f1_score(yr_test, yr_pred_tstr, average="micro")
+
     report_tstr = classification_report(
         yr_test,
         yr_pred_tstr,
@@ -507,13 +591,45 @@ def evaluate_provider_specialty_utility(
         zero_division=0,
     )
 
-    utility_ratio = macro_f1_tstr / macro_f1_trtr if macro_f1_trtr > 0 else np.nan
+    # -----------------------------
+    # TR+S->R: train on REAL ∪ SYNTH, test on REAL
+    # -----------------------------
+    from scipy.sparse import vstack
+
+    X_train_mixed = vstack([Xr_train, X_synth_known])
+    y_train_mixed = np.concatenate([yr_train, y_synth_enc])
+
+    clf_trsr = LogisticRegression(
+        solver="liblinear",
+        max_iter=1000,
+        multi_class="ovr",
+    )
+    clf_trsr.fit(X_train_mixed, y_train_mixed)
+    yr_pred_trsr = clf_trsr.predict(Xr_test)
+
+    macro_f1_trsr = f1_score(yr_test, yr_pred_trsr, average="macro")
+    micro_f1_trsr = f1_score(yr_test, yr_pred_trsr, average="micro")
+
+    report_trsr = classification_report(
+        yr_test,
+        yr_pred_trsr,
+        target_names=le.classes_,
+        output_dict=True,
+        zero_division=0,
+    )
+
+    # Utility ratios
+    utility_ratio_tstr_trtr = macro_f1_tstr / macro_f1_trtr if macro_f1_trtr > 0 else np.nan
+    utility_ratio_trsr_trtr = macro_f1_trsr / macro_f1_trtr if macro_f1_trtr > 0 else np.nan
 
     print("\n[UTILITY: PROVIDER SPECIALTY PREDICTION]")
-    print(f"  Retained provider specialties: {len(keep_classes)}")
-    print(f"  Macro F1 (TRTR, real->real):   {macro_f1_trtr:.4f}")
-    print(f"  Macro F1 (TSTR, synth->real):  {macro_f1_tstr:.4f}")
-    print(f"  Utility ratio (TSTR/TRTR):     {utility_ratio:.4f}")
+    print(f"  Retained canonical specialties (before rare->Other): {len(keep_classes)}")
+    print(f"  Unique eval classes (incl. 'Other'):                {len(le.classes_)}")
+    print(f"  Macro F1 (TRTR, real->real):                       {macro_f1_trtr:.4f}")
+    print(f"  Macro F1 (TSTR, synth->real):                      {macro_f1_tstr:.4f}")
+    print(f"  Macro F1 (TR+S->R, real+synth->real):              {macro_f1_trsr:.4f}")
+    print(f"  Utility ratio (TSTR/TRTR):                         {utility_ratio_tstr_trtr:.4f}")
+    print(f"  Utility ratio (TR+S->R / TRTR):                    {utility_ratio_trsr_trtr:.4f}")
 
     per_class_f1_trtr = {
         cls: report_trtr[cls]["f1-score"]
@@ -525,15 +641,27 @@ def evaluate_provider_specialty_utility(
         for cls in le.classes_
         if cls in report_tstr
     }
+    per_class_f1_trsr = {
+        cls: report_trsr[cls]["f1-score"]
+        for cls in le.classes_
+        if cls in report_trsr
+    }
 
     return {
         "macro_f1_trtr": float(macro_f1_trtr),
+        "micro_f1_trtr": float(micro_f1_trtr),
         "macro_f1_tstr": float(macro_f1_tstr),
-        "utility_ratio": float(utility_ratio),
+        "micro_f1_tstr": float(micro_f1_tstr),
+        "macro_f1_trsr": float(macro_f1_trsr),
+        "micro_f1_trsr": float(micro_f1_trsr),
+        "utility_ratio_tstr_trtr": float(utility_ratio_tstr_trtr),
+        "utility_ratio_trsr_trtr": float(utility_ratio_trsr_trtr),
         "per_class_f1_trtr": per_class_f1_trtr,
         "per_class_f1_tstr": per_class_f1_tstr,
+        "per_class_f1_trsr": per_class_f1_trsr,
         "retained_specialties": keep_classes,
     }
+
 
 
 
@@ -602,4 +730,4 @@ def test_evaluations(
 
 if __name__ == "__main__":
     # Run a quick test with defaults
-    test_evaluations(plot_wasserstein=False)
+    test_evaluations(plot_wasserstein=True)

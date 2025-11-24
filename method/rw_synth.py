@@ -16,6 +16,12 @@ from tqdm import tqdm
 # Core random-walk for a single synthetic row
 # ============================================================
 
+_GLOBAL_GRAPH = None
+
+def _init_worker(graph: nx.Graph):
+    global _GLOBAL_GRAPH
+    _GLOBAL_GRAPH = graph
+
 def run_random_walk(
     G: nx.Graph,
     start_node: str,
@@ -250,11 +256,7 @@ def run_random_walk(
 # ============================================================
 
 def _walk_worker(args: Tuple) -> Dict[str, str]:
-    """
-    Helper for multiprocessing: unpack args and call run_random_walk.
-    """
     (
-        G,
         start_node,
         restart_prob,
         use_edge_weight,
@@ -268,7 +270,7 @@ def _walk_worker(args: Tuple) -> Dict[str, str]:
 
     rng = random.Random(seed)
     return run_random_walk(
-        G=G,
+        G=_GLOBAL_GRAPH,           # <--- use global graph
         start_node=start_node,
         restart_prob=restart_prob,
         use_edge_weight=use_edge_weight,
@@ -281,6 +283,7 @@ def _walk_worker(args: Tuple) -> Dict[str, str]:
     )
 
 
+
 def _build_synth_filename(
     graph_label: str,
     restart_prob: float,
@@ -289,6 +292,7 @@ def _build_synth_filename(
     encounter_policy: str,
     stop_rule: str,
     stop_percentage: float,
+    max_steps: int,
 ) -> str:
     """
     Build filename encoding the ablation parameters.
@@ -298,7 +302,8 @@ def _build_synth_filename(
     use_edge_weight: edg / nedg
     inverse_degree: invdeg / nodeg
     encounter_policy: 'first' or 'second'
-    stop_rule: 'complete' -> comp, 'percentage' -> pct{int(100*stop_percentage)}
+    stop_rule: 'complete' -> comp, 'percentage' -> pctXX
+    max_steps: maximum walk length -> ms{max_steps}
     """
     alpha_int = int(round(100 * restart_prob))
     edge_flag = "edg" if use_edge_weight else "nedg"
@@ -310,8 +315,15 @@ def _build_synth_filename(
         pct_int = int(round(100 * stop_percentage))
         stop_part = f"pct{pct_int}"
 
-    fname = f"{graph_label}_alpha{alpha_int}_{edge_flag}_{deg_flag}_{encounter_policy}_{stop_part}.csv"
+    # Add max steps suffix
+    ms_part = f"ms{max_steps}"
+
+    fname = (
+        f"{graph_label}_alpha{alpha_int}_{edge_flag}_"
+        f"{deg_flag}_{encounter_policy}_{stop_part}_{ms_part}.csv"
+    )
     return fname
+
 
 
 def generate_synthetic_dataset(
@@ -327,56 +339,36 @@ def generate_synthetic_dataset(
     max_steps: int = 100,
     n_workers: Optional[int] = None,
     random_state: int = 42,
+    show_progress: bool = True,
 ) -> Path:
     """
     Generate a synthetic dataset by running one random walk per visit node.
-
-    Parameters
-    ----------
-    G : nx.Graph or nx.DiGraph
-        The heterogeneous graph (directed or undirected).
-    graph_label : str
-        'dir' for directed, 'ud' for undirected. Used only in filename.
-    output_dir : Path
-        Path to the samp{x} directory, e.g. processed/graphs/samp25.
-        The synthetic file will be saved under output_dir / 'synth' / <filename>.csv
-    restart_prob : float
-    use_edge_weight : bool
-    inverse_degree : bool
-    encounter_policy : str
-        'first' or 'second' (applies to person/provider).
-    stop_rule : str
-        'complete' or 'percentage'.
-    stop_percentage : float
-        Fraction of single-valued fields that must be filled if stop_rule == 'percentage'.
-    max_steps : int
-        Maximum number of steps per walk.
-    n_workers : int or None
-        Number of worker processes. If None, use all available cores.
-    random_state : int
-        Base seed for reproducibility.
+    Each worker process receives the graph once via initializer, and then
+    runs multiple walks without further pickling overhead.
 
     Returns
     -------
     Path
-        Path to the synthetic CSV file.
+        Location of the generated synthetic CSV file.
     """
 
     output_dir = Path(output_dir)
     synth_dir = output_dir / "synth"
     synth_dir.mkdir(parents=True, exist_ok=True)
 
+    # -------------------------------------------------
     # Collect visit nodes
-    visit_nodes = [
+    # -------------------------------------------------
+    visit_nodes = sorted(
         n for n, data in G.nodes(data=True)
         if data.get("node_type") == "visit"
-    ]
-    visit_nodes = sorted(visit_nodes)  # deterministic order
-
+    )
     if not visit_nodes:
-        raise ValueError("No visit nodes found in graph (node_type == 'visit').")
+        raise ValueError("No visit nodes found in the graph.")
 
-    # Build filename
+    # -------------------------------------------------
+    # Build output filename
+    # -------------------------------------------------
     synth_fname = _build_synth_filename(
         graph_label=graph_label,
         restart_prob=restart_prob,
@@ -385,24 +377,28 @@ def generate_synthetic_dataset(
         encounter_policy=encounter_policy,
         stop_rule=stop_rule,
         stop_percentage=stop_percentage,
+        max_steps=max_steps,
     )
     synth_path = synth_dir / synth_fname
 
     print(f"[INFO] Generating synthetic data for {len(visit_nodes):,} visit nodes.")
     print(f"[INFO] Output synthetic CSV: {synth_path}")
 
-    # Prepare worker args
+    # -------------------------------------------------
+    # Determine worker count
+    # -------------------------------------------------
     if n_workers is None or n_workers <= 0:
         n_workers = cpu_count()
 
+    # -------------------------------------------------
+    # Build worker arguments (DO NOT include graph)
+    # -------------------------------------------------
     base_seed = random_state
     worker_args = []
-    for i, v in enumerate(visit_nodes):
-        seed = base_seed + i
+    for i, start_node in enumerate(visit_nodes):
         worker_args.append(
             (
-                G,
-                v,
+                start_node,
                 restart_prob,
                 use_edge_weight,
                 inverse_degree,
@@ -410,30 +406,52 @@ def generate_synthetic_dataset(
                 stop_rule,
                 stop_percentage,
                 max_steps,
-                seed,
+                base_seed + i,
             )
         )
 
-    # Run in parallel
-    # Run in parallel with tqdm tracking
+    # -------------------------------------------------
+    # Run walks: parallel or single-thread
+    # -------------------------------------------------
     results = []
 
     if n_workers == 1:
-        # Serial loop with tqdm
-        for res in tqdm(map(_walk_worker, worker_args),
-                        total=len(worker_args),
-                        desc="Random walks"):
+        # --- Serial execution ---
+        iterator = map(_walk_worker, worker_args)
+
+        if show_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(worker_args),
+                desc="Random walks",
+            )
+
+        for res in iterator:
             results.append(res)
+
     else:
-        # Parallel pool with tqdm
-        with Pool(processes=n_workers) as pool:
-            # imap_unordered yields results as they complete
-            for res in tqdm(pool.imap_unordered(_walk_worker, worker_args),
-                            total=len(worker_args),
-                            desc=f"Random walks ({n_workers} workers)"):
+        # --- Multiprocessing pool ---
+        with Pool(
+            processes=n_workers,
+            initializer=_init_worker,     # load graph once
+            initargs=(G,),
+        ) as pool:
+
+            iterator = pool.imap_unordered(_walk_worker, worker_args)
+
+            if show_progress:
+                iterator = tqdm(
+                    iterator,
+                    total=len(worker_args),
+                    desc=f"Random walks ({n_workers} workers)",
+                )
+
+            for res in iterator:
                 results.append(res)
 
-    # Write CSV
+    # -------------------------------------------------
+    # Write output CSV
+    # -------------------------------------------------
     fieldnames = [
         "visitID",
         "personID",
@@ -445,8 +463,8 @@ def generate_synthetic_dataset(
     with synth_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for row in results:
-            writer.writerow(row)
+        writer.writerows(results)
 
     print(f"[SAVE] Synthetic dataset -> {synth_path}")
     return synth_path
+
