@@ -46,7 +46,7 @@ REAL_FACTS_PATH = (
     / "sampled_visit_facts.csv"
 )
 
-SYNTH_FILENAME = "un_alpha30_edg_nodeg_first_comp.csv"
+SYNTH_FILENAME = "dir_alpha10_edg_invdeg_first_comp_ms100.csv"
 SYNTH_PATH = (
     PROJECT_ROOT
     / "data"
