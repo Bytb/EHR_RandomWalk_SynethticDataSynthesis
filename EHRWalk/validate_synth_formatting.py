@@ -20,7 +20,7 @@ Each row = one visit.
 REQUIRED PROJECT STRUCTURE
 -----------------------------
 
-This script MUST live in the `method/` directory:
+This script MUST live in the `EHRWalk/` directory:
 
 project_root/
     data/
@@ -28,7 +28,7 @@ project_root/
             real_visits_processed.csv         ← REAL per-visit table (optional for vocab check)
         synth/
             synth_visits_processed.csv        ← SYNTHETIC per-visit table to validate
-    method/
+    EHRWalk/
         validate_synth.py                     ← YOU ARE HERE
 
 -----------------------------
@@ -40,7 +40,7 @@ HOW TO RUN
        SYNTH_PATH = "../data/synth/synth_visits_processed.csv"
        REAL_PATH  = "../data/real/real_visits_processed.csv"   # optional
 
-2. From inside the `method/` folder, run:
+2. From inside the `EHRWalk/` folder, run:
 
        python validate_synth.py
 
@@ -55,7 +55,7 @@ import textwrap
 import pandas as pd
 
 # ==============================================================================
-# CONFIG BLOCK — EDIT THESE PATHS RELATIVE TO method/ DIRECTORY
+# CONFIG BLOCK — EDIT THESE PATHS RELATIVE TO EHRWalk/ DIRECTORY
 # ==============================================================================
 
 # REQUIRED — Path to the synthetic per-visit CSV used by the evaluation script
