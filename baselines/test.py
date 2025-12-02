@@ -1,67 +1,87 @@
-import pandas as pd
+# probe_ablation_results.py
+from __future__ import annotations
+
 from pathlib import Path
-import textwrap
+from typing import List
 
-def analyze_csv(csv_path: str) -> None:
-    path = Path(csv_path)
-    if not path.exists():
-        print(f"[ERROR] File not found: {path}")
-        return
+import pandas as pd
 
-    print(f"[INFO] Loading CSV from: {path.resolve()}")
-    df = pd.read_csv(path)
+# ==========================
+# Config (edit as needed)
+# ==========================
+
+SAMPLE_ID = 100  # samp{SAMPLE_ID}
+
+# Assume same layout as run_rw_synth_ablation.py
+THIS_FILE = Path(__file__).resolve()
+PROJECT_ROOT = THIS_FILE.parents[1]  # adjust if you put this elsewhere
+GRAPHS_ROOT = PROJECT_ROOT / "data" / "processed" / "graphs"
+SAMPLE_DIR = GRAPHS_ROOT / f"samp{SAMPLE_ID}"
+RESULTS_CSV_NAME = "ablation_results.csv"
+RESULTS_PATH = SAMPLE_DIR / RESULTS_CSV_NAME
+
+# Columns we *know* are knobs / meta (everything else we treat as metrics)
+KNOWN_KNOB_COLS: List[str] = [
+    "sample_id",
+    "synth_path",
+    "graph_label",
+    "restart_prob",
+    "use_edge_weight",
+    "inverse_degree",
+    "encounter_policy",
+    "stop_rule",
+    "stop_percentage",
+    "max_steps",
+    "n_workers",
+    "random_state",
+]
+
+
+def main() -> None:
+    if not RESULTS_PATH.exists():
+        raise FileNotFoundError(
+            f"Could not find ablation results CSV at:\n  {RESULTS_PATH}"
+        )
+
+    print(f"[LOAD] {RESULTS_PATH}")
+    df = pd.read_csv(RESULTS_PATH)
     n_rows, n_cols = df.shape
-    print(f"\n[SHAPE] Rows: {n_rows:,}  |  Columns: {n_cols:,}\n")
+    print(f"[INFO] Shape: {n_rows} rows × {n_cols} columns\n")
 
-    summary_rows = []
-
+    print("[COLUMNS]")
     for col in df.columns:
-        s = df[col]
-        dtype = str(s.dtype)
-        non_null = s.notna().sum()
-        nulls = s.isna().sum()
-        nunique = s.nunique(dropna=True)
-        pct_unique = (nunique / non_null * 100) if non_null > 0 else 0.0
+        print(f"  - {col}")
+    print()
 
-        min_val = max_val = None
-        if pd.api.types.is_numeric_dtype(s):
-            min_val = s.min()
-            max_val = s.max()
+    # Identify knob vs metric columns
+    knob_cols = [c for c in df.columns if c in KNOWN_KNOB_COLS]
+    metric_cols = [c for c in df.columns if c not in KNOWN_KNOB_COLS]
 
-        examples = list(s.dropna().unique()[:5])
-        examples_str = ", ".join(map(str, examples))
+    print("[KNOB / META COLUMNS]")
+    for col in knob_cols:
+        print(f"  - {col}")
+    print()
 
-        summary_rows.append({
-            "column": col,
-            "dtype": dtype,
-            "non_null": int(non_null),
-            "nulls": int(nulls),
-            "nunique": int(nunique),
-            "pct_unique": round(pct_unique, 2),
-            "min": min_val,
-            "max": max_val,
-            "examples": examples_str,
-        })
+    print("[METRIC COLUMNS]")
+    for col in metric_cols:
+        print(f"  - {col}")
+    print()
 
-    summary_df = pd.DataFrame(summary_rows)
-    summary_df = summary_df.sort_values(by="pct_unique", ascending=False)
+    # Show a couple of example rows to see metric ranges
+    print("[HEAD (first 3 rows)]")
+    print(df.head(3).to_string(index=False))
+    print()
 
-    with pd.option_context("display.max_rows", None,
-                           "display.max_colwidth", 80,
-                           "display.width", 200):
-        print("[COLUMN SUMMARY]\n")
-        print(summary_df[[
-            "column", "dtype", "non_null", "nulls",
-            "nunique", "pct_unique", "min", "max"
-        ]])
-
-    print("\n[EXAMPLE VALUES BY COLUMN]\n")
-    for row in summary_rows:
-        col = row["column"]
-        ex_str = textwrap.shorten(row["examples"], width=120, placeholder="...")
-        print(f"- {col}: {ex_str}")
+    # Quick sanity: check for NaNs in metric columns
+    nan_counts = df[metric_cols].isna().sum()
+    if nan_counts.any():
+        print("[WARN] NaNs detected in metric columns:")
+        for col, count in nan_counts.items():
+            if count > 0:
+                print(f"  - {col}: {count} NaNs")
+    else:
+        print("[INFO] No NaNs detected in metric columns.")
 
 
 if __name__ == "__main__":
-    csv_path = r"C:\Users\Caleb\PycharmProjects\EHR_RandomWalk_SynethticDataSynthesis\data\processed\visit_fact_table.csv"
-    analyze_csv(csv_path)
+    main()
