@@ -17,7 +17,7 @@ THIS_FILE = Path(__file__).resolve()
 PROJECT_ROOT = THIS_FILE.parents[1]  # adjust if you put this elsewhere
 GRAPHS_ROOT = PROJECT_ROOT / "data" / "processed" / "graphs"
 SAMPLE_DIR = GRAPHS_ROOT / f"samp{SAMPLE_ID}"
-RESULTS_CSV_NAME = "ablation_results.csv"
+RESULTS_CSV_NAME = "ablation_results_24.csv"
 RESULTS_PATH = SAMPLE_DIR / RESULTS_CSV_NAME
 
 # Columns we *know* are knobs / meta (everything else we treat as metrics)

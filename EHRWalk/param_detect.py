@@ -1,9 +1,9 @@
 # paramdetect_ablation.py
 """
-ParamDetect: Scan ablation_results.csv and identify best configurations.
+ParamDetect: Scan ablation_results_24.csv and identify best configurations.
 
 - Reads:
-    data/processed/graphs/samp{SAMPLE_ID}/ablation_results.csv
+    data/processed/graphs/samp{SAMPLE_ID}/ablation_results_24.csv
 
 - Computes per-config scores:
     score_wasserstein  (higher = better)
@@ -37,8 +37,8 @@ import numpy as np
 
 SAMPLE_ID = 100  # samp{SAMPLE_ID}
 
-# Sibling to ablation_results.csv
-RESULTS_CSV_NAME = "ablation_results.csv"
+# Sibling to ablation_results_24.csv
+RESULTS_CSV_NAME = "ablation_results_24.csv"
 PARAMDETECT_CSV_NAME = "ablation_paramdetect.csv"
 
 
@@ -50,7 +50,7 @@ def _get_project_root(this_file: Path) -> Path:
     """
     Infer project root assuming layout:
       PROJECT_ROOT/
-        data/processed/graphs/samp{SAMPLE_ID}/ablation_results.csv
+        data/processed/graphs/samp{SAMPLE_ID}/ablation_results_24.csv
         scripts/...
     Adjust parents[...] if you place this file elsewhere.
     """
@@ -128,12 +128,29 @@ def main() -> None:
         "max_steps",
     ]
 
+    # Also require restart_prob so we can filter by it
+    required_cols.append("restart_prob")
+
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(
-            "Missing required columns in ablation_results.csv:\n"
+            "Missing required columns in ablation_results_24.csv:\n"
             + "\n".join(f"  - {c}" for c in missing)
         )
+
+    # --------------------------------------------------
+    # Filter: only keep rows with restart_prob ~= 0.3
+    # --------------------------------------------------
+    target_restart = 0.3
+    mask = np.isclose(df["restart_prob"].astype(float), target_restart)
+
+    if not mask.any():
+        raise ValueError(
+            f"No rows found with restart_prob ≈ {target_restart} in {results_path}"
+        )
+
+    df = df[mask].reset_index(drop=True)
+    print(f"[FILTER] Keeping {len(df)} configs with restart_prob ≈ {target_restart}")
 
     # ==========================
     # 1) Category scores

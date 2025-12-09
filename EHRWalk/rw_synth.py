@@ -413,10 +413,16 @@ def generate_synthetic_dataset(
     # -------------------------------------------------
     # Run walks: parallel or single-thread
     # -------------------------------------------------
+    # -------------------------------------------------
+    # Run walks: parallel or single-thread
+    # -------------------------------------------------
     results = []
 
     if n_workers == 1:
         # --- Serial execution ---
+        # Initialize the global graph in this process
+        _init_worker(G)
+
         iterator = map(_walk_worker, worker_args)
 
         if show_progress:
@@ -432,9 +438,9 @@ def generate_synthetic_dataset(
     else:
         # --- Multiprocessing pool ---
         with Pool(
-            processes=n_workers,
-            initializer=_init_worker,     # load graph once
-            initargs=(G,),
+                processes=n_workers,
+                initializer=_init_worker,  # load graph once per worker
+                initargs=(G,),
         ) as pool:
 
             iterator = pool.imap_unordered(_walk_worker, worker_args)

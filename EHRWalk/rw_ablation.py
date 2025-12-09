@@ -6,7 +6,7 @@ Ablation driver for the rw_synth random-walk generator.
 - Loads undirected + directed graphs for samp{SAMPLE_ID}.
 - Runs generate_synthetic_dataset() over a grid of hyperparameters.
 - For each synthetic CSV, runs the evaluation pipeline from evaluation.py.
-- Writes a single CSV (ablation_results.csv) with:
+- Writes a single CSV (ablation_results_24.csv) with:
     - knob settings for each run
     - scalar evaluation metrics
 
@@ -57,7 +57,7 @@ SAMPLE_ID = 100  # samp{SAMPLE_ID}
 
 # Ablation grid
 GRAPH_LABELS = ["un", "dir"]
-RESTART_PROBS = [0.1, 0.3, 0.5]
+RESTART_PROBS = [0.2, 0.4]
 USE_EDGE_WEIGHT_OPTS = [True, False]
 INVERSE_DEGREE_OPTS = [False, True]
 ENCOUNTER_POLICIES = ["first", "second"]
@@ -71,7 +71,7 @@ MAX_STEPS_OPTS = [100, 200, 300]
 N_WORKERS = 28
 BASE_RANDOM_STATE = 42
 
-RESULTS_CSV_NAME = "ablation_results.csv"
+RESULTS_CSV_NAME = "ablation_results_24.csv"
 
 
 # ==========================
