@@ -41,6 +41,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
+sns.set_style("white")
+
 import networkx as nx
 
 
@@ -59,10 +61,8 @@ GRAPHS_ROOT = PROJECT_ROOT / "data" / "processed" / "graphs"
 SAMPLE_DIR = GRAPHS_ROOT / f"samp{SAMPLE_ID}"
 ABLATION_CSV = SAMPLE_DIR / "ablation_results_merge.csv"
 
-# Real-data CSVs (for distribution plots)
-REAL_DATA_DIR = PROJECT_ROOT / "data" / "clean_csvs"
-DRUG_CSV = REAL_DATA_DIR / "sampled_drug_exposure.csv"
-COND_CSV = REAL_DATA_DIR / "sampled_condition_occurrence.csv"
+# Real-data visit-fact table (already filtered with REQUIRE_ALL_NODE_TYPES)
+VISIT_FACT_CSV = PROJECT_ROOT / "data" / "processed" / "visit_fact_table.csv"
 
 # Graph filenames (matching run_rw_synth_ablation.py)
 UNDIRECTED_GRAPH_FILE = "hetero_graph_undirected.gpickle"
@@ -70,10 +70,15 @@ DIRECTED_GRAPH_FILE = "hetero_graph_directed.gpickle"
 
 # Output directory for figures + table
 FIG_DIR = PROJECT_ROOT / "results" / "figures"
+HEATMAP_DIR = FIG_DIR / "heatmaps"
+REALDATA_DIR = FIG_DIR / "real_data_distributions"  # <--- add this
 TABLE_DIR = PROJECT_ROOT / "results" / "tables"
 
 FIG_DIR.mkdir(parents=True, exist_ok=True)
+HEATMAP_DIR.mkdir(parents=True, exist_ok=True)
+REALDATA_DIR.mkdir(parents=True, exist_ok=True)     # <--- and this
 TABLE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # Random seed for reproducible graph subsampling/layout
 RANDOM_SEED = 42
@@ -99,6 +104,7 @@ def load_ablation_results(path: Path) -> pd.DataFrame:
         "inverse_degree",
         "max_steps",
         "p_test_auc",
+        "p_test_accuracy",            # <--- added
         "wasserstein_drugs",
         "wasserstein_conditions",
         "macro_f1_trtr",
@@ -114,6 +120,7 @@ def load_ablation_results(path: Path) -> pd.DataFrame:
     if missing:
         print(f"[WARN] Ablation CSV is missing columns: {missing}")
     return df
+
 
 
 def _plot_hist_from_counts(
@@ -137,7 +144,7 @@ def _plot_hist_from_counts(
     plt.title(title)
     plt.xlabel("Count")
     plt.ylabel("Frequency")
-    out_path = FIG_DIR / filename
+    out_path = REALDATA_DIR / filename
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -376,6 +383,10 @@ def plot_hetero_graphs(sample_dir: Path) -> None:
 # 2) P-test AUC heatmaps vs hyperparameters
 # =============================================================================
 
+# =============================================================================
+# 2) P-test AUC heatmaps vs hyperparameters
+# =============================================================================
+
 def _heatmap_from_group(
     df: pd.DataFrame,
     row_key: str,
@@ -405,7 +416,7 @@ def _heatmap_from_group(
     plt.title(title)
     plt.xlabel(col_key)
     plt.ylabel(row_key)
-    out_path = FIG_DIR / filename
+    out_path = HEATMAP_DIR / filename           # <--- now in heatmaps folder
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -703,165 +714,319 @@ EHRWalk & \cmark & \cmark & \xmark & \xmark & \cmark \\
 # =============================================================================
 # 6) Real-data degree distributions + outlier diagnostics
 # =============================================================================
+# =============================================================================
+# 6) Real-data degree distributions + outlier diagnostics (from visit_fact_table)
+# =============================================================================
 
 def plot_real_distributions() -> None:
     """
-    Plot REAL data distributions for:
-      - drug_concept_id degree
-      - condition_concept_id degree
-      - provider_id degree (events across drug + condition)
+    Plot REAL data distributions from the filtered visit_fact_table:
+
+      - #drugs per visit      (n_drugs)
+      - #conditions per visit (n_conditions)
+      - events per visit      (n_drugs + n_conditions)
       - visits per person
-      - events per visit
+      - events per provider   (sum of n_drugs + n_conditions over visits)
 
     Also print outlier diagnostics for each distribution.
     """
-    print(f"[INFO] Real data dir: {REAL_DATA_DIR}")
-    if not DRUG_CSV.exists():
-        print(f"[WARN] Drug CSV not found at {DRUG_CSV}; skipping real-data distributions.")
-        return
-    if not COND_CSV.exists():
-        print(f"[WARN] Condition CSV not found at {COND_CSV}; skipping real-data distributions.")
+    print(f"[INFO] Loading visit facts from: {VISIT_FACT_CSV}")
+    if not VISIT_FACT_CSV.exists():
+        print(f"[WARN] visit_fact_table.csv not found at {VISIT_FACT_CSV}; "
+              f"skipping real-data distributions.")
         return
 
-    print(f"[LOAD] {DRUG_CSV}")
-    df_drug = pd.read_csv(
-        DRUG_CSV,
-        usecols=["person_id", "drug_concept_id", "provider_id", "visit_occurrence_id"],
-        low_memory=False,
-    )
-    print(f"[INFO] sampled_drug_exposure: rows={len(df_drug):,}")
+    use_cols = [
+        "visit_occurrence_id",
+        "person_id",
+        "provider_id",
+        "n_drugs",
+        "n_conditions",
+    ]
+    df = pd.read_csv(VISIT_FACT_CSV, usecols=use_cols, low_memory=False)
+    print(f"[INFO] rows (visits): {len(df):,}")
 
-    print(f"[LOAD] {COND_CSV}")
-    df_cond = pd.read_csv(
-        COND_CSV,
-        usecols=["person_id", "condition_concept_id", "provider_id", "visit_occurrence_id"],
-        low_memory=False,
-    )
-    print(f"[INFO] sampled_condition_occurrence: rows={len(df_cond):,}")
+    # Ensure numeric
+    df["n_drugs"] = pd.to_numeric(df["n_drugs"], errors="coerce").fillna(0).astype(int)
+    df["n_conditions"] = pd.to_numeric(df["n_conditions"], errors="coerce").fillna(0).astype(int)
 
-    # 1) Drug degree distribution: total occurrences per drug_concept_id
-    drug_counts_series = (
-        df_drug["drug_concept_id"]
-        .dropna()
-        .value_counts()
-        .astype(int)
-    )
+    # ------------------------------------------------------------------
+    # 1) #drugs per visit
+    # ------------------------------------------------------------------
+    drugs_per_visit = df["n_drugs"]
     _print_outlier_diagnostics(
-        "drug_concept_id degree (real data)",
-        drug_counts_series,
+        "#drugs per visit",
+        drugs_per_visit,
     )
     _plot_hist_from_counts(
-        drug_counts_series.values,
-        "Degree distribution: drug_concept_id (real data)",
-        f"real_deg_drug_concept_id_samp{SAMPLE_ID}.png",
+        drugs_per_visit.values,
+        "#drugs per visit (real data)",
+        f"real_drugs_per_visit_samp{SAMPLE_ID}.png",
         bins=60,
         log_y=True,
     )
 
-    # 2) Condition degree distribution: total occurrences per condition_concept_id
-    cond_counts_series = (
-        df_cond["condition_concept_id"]
-        .dropna()
-        .value_counts()
-        .astype(int)
-    )
+    # ------------------------------------------------------------------
+    # 2) #conditions per visit
+    # ------------------------------------------------------------------
+    conds_per_visit = df["n_conditions"]
     _print_outlier_diagnostics(
-        "condition_concept_id degree (real data)",
-        cond_counts_series,
+        "#conditions per visit",
+        conds_per_visit,
     )
     _plot_hist_from_counts(
-        cond_counts_series.values,
-        "Degree distribution: condition_concept_id (real data)",
-        f"real_deg_condition_concept_id_samp{SAMPLE_ID}.png",
+        conds_per_visit.values,
+        "#conditions per visit (real data)",
+        f"real_conditions_per_visit_samp{SAMPLE_ID}.png",
         bins=60,
         log_y=True,
     )
 
-    # 3) Provider degree distribution: events across drug + condition
-    prov_counts_drug = (
-        df_drug["provider_id"]
-        .dropna()
-        .value_counts()
-    )
-    prov_counts_cond = (
-        df_cond["provider_id"]
-        .dropna()
-        .value_counts()
-    )
-    prov_counts_total = prov_counts_drug.add(prov_counts_cond, fill_value=0).astype(int)
-
+    # ------------------------------------------------------------------
+    # 3) Total events per visit (#drugs + #conditions)
+    # ------------------------------------------------------------------
+    total_events_per_visit = (df["n_drugs"] + df["n_conditions"]).astype(int)
     _print_outlier_diagnostics(
-        "provider_id degree (events: drug + condition, real data)",
-        prov_counts_total,
+        "total events per visit (#drugs + #conditions)",
+        total_events_per_visit,
     )
     _plot_hist_from_counts(
-        prov_counts_total.values,
-        "Degree distribution: provider_id (events: drug + condition, real data)",
-        f"real_deg_provider_id_samp{SAMPLE_ID}.png",
+        total_events_per_visit.values,
+        "Total events per visit (real data)",
+        f"real_events_per_visit_samp{SAMPLE_ID}.png",
         bins=60,
         log_y=True,
     )
 
-    # 4) Visits per person: unique visits per person across both tables
-    pv_drug = (
-        df_drug[["person_id", "visit_occurrence_id"]]
-        .dropna()
-        .drop_duplicates()
+    # ------------------------------------------------------------------
+    # 4) Visits per person
+    # ------------------------------------------------------------------
+    visits_per_person = (
+        df.dropna(subset=["person_id"])
+          .groupby("person_id")["visit_occurrence_id"]
+          .nunique()
+          .astype(int)
     )
-    pv_cond = (
-        df_cond[["person_id", "visit_occurrence_id"]]
-        .dropna()
-        .drop_duplicates()
-    )
-    pv_all = (
-        pd.concat([pv_drug, pv_cond], ignore_index=True)
-        .drop_duplicates()
-    )
-    visits_per_person_series = (
-        pv_all
-        .groupby("person_id")["visit_occurrence_id"]
-        .nunique()
-        .astype(int)
-    )
-
     _print_outlier_diagnostics(
-        "visits per person (real data, drug + condition)",
-        visits_per_person_series,
+        "visits per person",
+        visits_per_person,
     )
     _plot_hist_from_counts(
-        visits_per_person_series.values,
-        "Visits per person (real data, drug + condition)",
+        visits_per_person.values,
+        "Visits per person (real data)",
         f"real_visits_per_person_samp{SAMPLE_ID}.png",
         bins=40,
         log_y=True,
     )
 
-    # 5) Events per visit: total events across drug + condition per visit
-    events_vis_drug = (
-        df_drug["visit_occurrence_id"]
-        .dropna()
-        .value_counts()
+    # ------------------------------------------------------------------
+    # 5) Events per provider (sum of events across visits)
+    # ------------------------------------------------------------------
+    df_with_events = df.copy()
+    df_with_events["total_events"] = total_events_per_visit
+
+    events_per_provider = (
+        df_with_events.dropna(subset=["provider_id"])
+                      .groupby("provider_id")["total_events"]
+                      .sum()
+                      .astype(int)
     )
-    events_vis_cond = (
-        df_cond["visit_occurrence_id"]
-        .dropna()
-        .value_counts()
-    )
-    events_vis_total = events_vis_drug.add(events_vis_cond, fill_value=0).astype(int)
 
     _print_outlier_diagnostics(
-        "events per visit (real data, drug + condition)",
-        events_vis_total,
+        "events per provider (drug + condition)",
+        events_per_provider,
     )
     _plot_hist_from_counts(
-        events_vis_total.values,
-        "Events per visit (real data, drug + condition)",
-        f"real_events_per_visit_samp{SAMPLE_ID}.png",
-        bins=40,
+        events_per_provider.values,
+        "Events per provider (real data)",
+        f"real_events_per_provider_samp{SAMPLE_ID}.png",
+        bins=60,
         log_y=True,
     )
 
+# =============================================================================
+# Boxplots: p-test mean vs restart_prob (ud + dir)
+# =============================================================================
+def _draw_box_and_points(
+    ax: plt.Axes,
+    df_sub: pd.DataFrame,
+    y_col: str,
+    title: str,
+    ylabel: str | None = None,
+) -> None:
+    """
+    Draw a white boxplot with black outlines plus jittered colored points
+    for y_col vs restart_prob on the given axis.
+    """
+    if df_sub.empty:
+        ax.text(
+            0.5,
+            0.5,
+            "No data",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+        return
 
+    df_sub = df_sub.copy()
+
+    # Ensure consistent ordering of restart_prob on x-axis
+    restart_vals = sorted(df_sub["restart_prob"].unique())
+    order = [str(rp) for rp in restart_vals]
+    df_sub["restart_prob_str"] = df_sub["restart_prob"].astype(str)
+
+    # Palette: one color per restart value
+    palette = sns.color_palette("Set2", n_colors=len(order))
+
+    # Boxplot (thin black lines, white interior)
+    sns.boxplot(
+        data=df_sub,
+        x="restart_prob_str",
+        y=y_col,
+        order=order,
+        ax=ax,
+        showcaps=True,
+        showfliers=False,
+        boxprops=dict(facecolor="white", edgecolor="black", linewidth=1.5),
+        whiskerprops=dict(color="black", linewidth=1.2),
+        medianprops=dict(color="black", linewidth=2),
+    )
+
+    # Overlay jittered points
+    sns.stripplot(
+        data=df_sub,
+        x="restart_prob_str",
+        y=y_col,
+        order=order,
+        ax=ax,
+        dodge=False,
+        jitter=0.18,
+        size=4,
+        alpha=0.9,
+        palette=palette,
+    )
+
+    ax.set_title(title)
+    ax.set_xlabel("Restart probability")
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+    else:
+        ax.set_ylabel("")
+    ax.set_facecolor("white")
+    sns.despine(ax=ax)
+
+def plot_ptest_boxplots(df: pd.DataFrame) -> None:
+    """
+    For each config, compute mean of p_test_auc and p_test_accuracy.
+    Then, for each graph_label ("un", "dir"), plot p-test mean vs restart_prob
+    as side-by-side boxplots with colored points in a single figure.
+    """
+    if "p_test_auc" not in df.columns or "p_test_accuracy" not in df.columns:
+        print("[WARN] p_test_auc or p_test_accuracy missing; skipping p-test boxplots.")
+        return
+
+    df = df.copy()
+    df["p_test_mean"] = (df["p_test_auc"] + df["p_test_accuracy"]) / 2.0
+
+    # NOTE: undirected is "un", not "ud"
+    df_un = df[df["graph_label"] == "un"].copy()
+    df_dir = df[df["graph_label"] == "dir"].copy()
+
+    if df_un.empty and df_dir.empty:
+        print("[WARN] No rows for graph_label in {'un','dir'}; skipping p-test boxplots.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), sharey=True)
+
+    # Undirected subplot
+    _draw_box_and_points(
+        ax=axes[0],
+        df_sub=df_un,
+        y_col="p_test_mean",
+        title="Undirected (p-test mean)",
+        ylabel="Mean p-test (AUC + Acc) / 2",
+    )
+
+    # Directed subplot
+    _draw_box_and_points(
+        ax=axes[1],
+        df_sub=df_dir,
+        y_col="p_test_mean",
+        title="Directed (p-test mean)",
+        ylabel=None,
+    )
+
+    # p-test is naturally between 0 and 1; keep a tight y-range if possible
+    axes[0].set_ylim(0.0, 1.05)
+    axes[1].set_ylim(0.0, 1.05)
+
+    fig.suptitle("Distribution of p-test mean vs restart probability", y=1.02)
+    out_path = FIG_DIR / f"boxplot_p_test_mean_vs_restart_samp{SAMPLE_ID}.png"
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[SAVE] p-test boxplots -> {out_path}")
+
+# =============================================================================
+# Boxplots: Wasserstein mean vs restart_prob (ud + dir)
+# =============================================================================
+def plot_wasserstein_boxplots(df: pd.DataFrame) -> None:
+    """
+    For each config, compute mean Wasserstein across drugs + conditions.
+    Then, for each graph_label ("un", "dir"), plot Wasserstein mean vs restart_prob
+    as side-by-side boxplots with colored points in a single figure.
+    """
+    required = ["wasserstein_drugs", "wasserstein_conditions"]
+    if any(c not in df.columns for c in required):
+        print("[WARN] Wasserstein columns missing; skipping Wasserstein boxplots.")
+        return
+
+    df = df.copy()
+    df["wasserstein_mean"] = (
+        df["wasserstein_drugs"] + df["wasserstein_conditions"]
+    ) / 2.0
+
+    # NOTE: undirected is "un", not "ud"
+    df_un = df[df["graph_label"] == "un"].copy()
+    df_dir = df[df["graph_label"] == "dir"].copy()
+
+    if df_un.empty and df_dir.empty:
+        print("[WARN] No rows for graph_label in {'un','dir'}; skipping Wasserstein boxplots.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), sharey=True)
+
+    # Undirected subplot
+    _draw_box_and_points(
+        ax=axes[0],
+        df_sub=df_un,
+        y_col="wasserstein_mean",
+        title="Undirected (Wasserstein mean)",
+        ylabel="Mean Wasserstein (drugs + conditions) / 2",
+    )
+
+    # Directed subplot
+    _draw_box_and_points(
+        ax=axes[1],
+        df_sub=df_dir,
+        y_col="wasserstein_mean",
+        title="Directed (Wasserstein mean)",
+        ylabel=None,
+    )
+
+    fig.suptitle("Distribution of Wasserstein mean vs restart probability", y=1.02)
+    out_path = FIG_DIR / f"boxplot_wasserstein_mean_vs_restart_samp{SAMPLE_ID}.png"
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[SAVE] Wasserstein boxplots -> {out_path}")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -885,10 +1050,14 @@ def main() -> None:
     # 2–4) Load ablation results
     df = load_ablation_results(ABLATION_CSV)
 
-    # 2) P-test heatmaps
+    # 2) P-test heatmaps  (now saved under HEATMAP_DIR)
     plot_p_test_heatmaps(df)
 
-    # 3) Wasserstein vs restart
+    # Boxplots for p-test and Wasserstein (diagnostics)
+    plot_ptest_boxplots(df)
+    plot_wasserstein_boxplots(df)
+
+    # 3) Wasserstein vs restart (best configs)
     plot_wasserstein_vs_restart(df)
 
     # 4) Utility vs restart (best configs)

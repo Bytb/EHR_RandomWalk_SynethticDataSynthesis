@@ -1,23 +1,25 @@
 # paramdetect_ablation.py
 """
-ParamDetect: Scan ablation_results_24.csv and identify best configurations.
+ParamDetect: Scan ablation_results_merge.csv and identify best configurations.
 
 - Reads:
-    data/processed/graphs/samp{SAMPLE_ID}/ablation_results_24.csv
+    data/processed/graphs/samp{SAMPLE_ID}/ablation_results_merge.csv
 
 - Computes per-config scores:
-    score_wasserstein  (higher = better)
-    score_ptest        (higher = better)
+    score_wasserstein  (normalized, higher = better; used ONLY for weighted overall)
+    score_ptest        (normalized, higher = better; used ONLY for weighted overall)
     score_f1           (higher = better)
     score_utility      (higher = better)
     score_overall      (weighted sum)
 
-- Marks best configs (with max_steps tie-break):
-    is_best_wasserstein
-    is_best_ptest
-    is_best_f1
-    is_best_utility
-    is_best_overall
+- For EACH restart_prob, marks best configs (with max_steps tie-break):
+    is_best_wasserstein   (min avg Wasserstein)
+    is_best_ptest         (min distance of p-test from 0.5 using AUC + accuracy)
+    is_best_f1            (max score_f1)
+    is_best_utility       (max score_utility)
+    is_best_overall       (max score_overall)
+
+- Also prints GLOBAL best configs across all restart_prob for quick inspection.
 
 - Writes:
     data/processed/graphs/samp{SAMPLE_ID}/ablation_paramdetect.csv
@@ -37,8 +39,8 @@ import numpy as np
 
 SAMPLE_ID = 100  # samp{SAMPLE_ID}
 
-# Sibling to ablation_results_24.csv
-RESULTS_CSV_NAME = "ablation_results_24.csv"
+# Sibling to ablation_results_merge.csv
+RESULTS_CSV_NAME = "ablation_results_merge.csv"
 PARAMDETECT_CSV_NAME = "ablation_paramdetect.csv"
 
 
@@ -50,39 +52,56 @@ def _get_project_root(this_file: Path) -> Path:
     """
     Infer project root assuming layout:
       PROJECT_ROOT/
-        data/processed/graphs/samp{SAMPLE_ID}/ablation_results_24.csv
+        data/processed/graphs/samp{SAMPLE_ID}/ablation_results_merge.csv
         scripts/...
     Adjust parents[...] if you place this file elsewhere.
     """
     return this_file.parents[1]
 
 
-def _pick_best_with_tiebreak(
+def _pick_best_with_tiebreak_max(
     df: pd.DataFrame,
     score_col: str,
     max_steps_col: str = "max_steps",
 ) -> int:
     """
-    Return the index (positional) of the best row for a given score column.
+    Return index (label) of the best row for a given score column (maximize).
 
     - Picks the row with maximum score_col.
     - If multiple rows tie on the score, pick the one with smaller max_steps.
     - If still multiple, pick the first among them.
     """
-    # Max score
     max_score = df[score_col].max()
-
-    # Filter rows with that max score (use exact equality; scores are simple arithmetic)
     tied = df[df[score_col] == max_score]
 
     if tied.shape[0] == 1:
         return int(tied.index[0])
 
-    # Tie-break: smaller max_steps
     min_steps = tied[max_steps_col].min()
     tied_steps = tied[tied[max_steps_col] == min_steps]
+    return int(tied_steps.index[0])
 
-    # If still multiple, take the first by index
+
+def _pick_best_with_tiebreak_min(
+    df: pd.DataFrame,
+    score_col: str,
+    max_steps_col: str = "max_steps",
+) -> int:
+    """
+    Return index (label) of the best row for a given score column (minimize).
+
+    - Picks the row with minimum score_col.
+    - If multiple rows tie on the score, pick the one with smaller max_steps.
+    - If still multiple, pick the first among them.
+    """
+    min_score = df[score_col].min()
+    tied = df[df[score_col] == min_score]
+
+    if tied.shape[0] == 1:
+        return int(tied.index[0])
+
+    min_steps = tied[max_steps_col].min()
+    tied_steps = tied[tied[max_steps_col] == min_steps]
     return int(tied_steps.index[0])
 
 
@@ -126,45 +145,44 @@ def main() -> None:
         "utility_ratio_trsr_trtr",
         "utility_ratio_tstr_trtr",
         "max_steps",
+        "restart_prob",
     ]
-
-    # Also require restart_prob so we can filter by it
-    required_cols.append("restart_prob")
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(
-            "Missing required columns in ablation_results_24.csv:\n"
+            "Missing required columns in ablation_results_merge.csv:\n"
             + "\n".join(f"  - {c}" for c in missing)
         )
 
-    # --------------------------------------------------
-    # Filter: only keep rows with restart_prob ~= 0.3
-    # --------------------------------------------------
-    target_restart = 0.3
-    mask = np.isclose(df["restart_prob"].astype(float), target_restart)
-
-    if not mask.any():
-        raise ValueError(
-            f"No rows found with restart_prob ≈ {target_restart} in {results_path}"
-        )
-
-    df = df[mask].reset_index(drop=True)
-    print(f"[FILTER] Keeping {len(df)} configs with restart_prob ≈ {target_restart}")
-
     # ==========================
-    # 1) Category scores
+    # 1) Raw aggregates used for selection + reporting
     # ==========================
 
-    # Wasserstein: average, then 1 / (1 + avg)
-    wasserstein_avg = (df["wasserstein_conditions"] + df["wasserstein_drugs"]) / 2.0
-    score_wasserstein = 1.0 / (1.0 + wasserstein_avg)
+    # Raw average Wasserstein (lower is better for selection)
+    df["wasserstein_avg"] = (
+        df["wasserstein_conditions"] + df["wasserstein_drugs"]
+    ) / 2.0
 
-    # P-test: deviation from 0.5, then 1 / (1 + dev)
-    ptest_dev = (
+    # Raw p-test average (we will REPORT this; selection uses deviation)
+    df["p_test_avg"] = (
+        df["p_test_auc"] + df["p_test_accuracy"]
+    ) / 2.0
+
+    # Deviation of p-test from 0.5 (AUC + accuracy); lower is better for selection
+    df["p_test_dev"] = (
         (df["p_test_auc"] - 0.5).abs() + (df["p_test_accuracy"] - 0.5).abs()
     ) / 2.0
-    score_ptest = 1.0 / (1.0 + ptest_dev)
+
+    # ==========================
+    # 2) Normalized scores for overall weighted score ONLY
+    # ==========================
+
+    # Wasserstein normalized: 1 / (1 + avg)
+    score_wasserstein = 1.0 / (1.0 + df["wasserstein_avg"])
+
+    # P-test deviation normalized: smaller dev -> larger score
+    score_ptest = 1.0 / (1.0 + df["p_test_dev"])
 
     # F1: average of all six macro/micro F1 values
     f1_cols = [
@@ -181,15 +199,7 @@ def main() -> None:
     util_cols = ["utility_ratio_trsr_trtr", "utility_ratio_tstr_trtr"]
     score_utility = df[util_cols].mean(axis=1)
 
-    # ==========================
-    # 2) Overall weighted score
-    # ==========================
-
-    # Weights:
-    #   Wasserstein: 20%
-    #   P-test:      30%
-    #   F1:          30%
-    #   Utility:     20%
+    # Weighted overall score (unchanged)
     score_overall = (
         0.20 * score_wasserstein
         + 0.30 * score_ptest
@@ -205,10 +215,9 @@ def main() -> None:
     df["score_overall"] = score_overall
 
     # ==========================
-    # 3) Identify best configs
+    # 3) Initialize flags
     # ==========================
 
-    # Initialize flags
     for col in [
         "is_best_wasserstein",
         "is_best_ptest",
@@ -218,26 +227,44 @@ def main() -> None:
     ]:
         df[col] = False
 
-    idx_best_w = _pick_best_with_tiebreak(df, "score_wasserstein")
-    idx_best_p = _pick_best_with_tiebreak(df, "score_ptest")
-    idx_best_f = _pick_best_with_tiebreak(df, "score_f1")
-    idx_best_u = _pick_best_with_tiebreak(df, "score_utility")
-    idx_best_o = _pick_best_with_tiebreak(df, "score_overall")
-
-    df.loc[idx_best_w, "is_best_wasserstein"] = True
-    df.loc[idx_best_p, "is_best_ptest"] = True
-    df.loc[idx_best_f, "is_best_f1"] = True
-    df.loc[idx_best_u, "is_best_utility"] = True
-    df.loc[idx_best_o, "is_best_overall"] = True
-
     # ==========================
-    # 4) Write output + print summary
+    # 4) Mark best configs per restart_prob
     # ==========================
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False)
+    print("\n[PER-RESTART BEST CONFIGS]")
+    for rp, group in df.groupby("restart_prob"):
+        sub = group
 
-    print(f"[SAVE] ParamDetect results written to:\n  {out_path}\n")
+        idx_best_w = _pick_best_with_tiebreak_min(sub, "wasserstein_avg")
+        idx_best_p = _pick_best_with_tiebreak_min(sub, "p_test_dev")
+        idx_best_f = _pick_best_with_tiebreak_max(sub, "score_f1")
+        idx_best_u = _pick_best_with_tiebreak_max(sub, "score_utility")
+        idx_best_o = _pick_best_with_tiebreak_max(sub, "score_overall")
+
+        df.loc[idx_best_w, "is_best_wasserstein"] = True
+        df.loc[idx_best_p, "is_best_ptest"] = True
+        df.loc[idx_best_f, "is_best_f1"] = True
+        df.loc[idx_best_u, "is_best_utility"] = True
+        df.loc[idx_best_o, "is_best_overall"] = True
+
+        print(f"\n  [restart_prob = {rp}]")
+        print(f"    best Wasserstein idx: {idx_best_w}")
+        print(f"    best p-test      idx: {idx_best_p}")
+        print(f"    best F1          idx: {idx_best_f}")
+        print(f"    best Utility     idx: {idx_best_u}")
+        print(f"    best Overall     idx: {idx_best_o}")
+
+    # ==========================
+    # 5) Global best configs (across all restart_prob) for quick summary
+    # ==========================
+
+    idx_best_w_global = _pick_best_with_tiebreak_min(df, "wasserstein_avg")
+    idx_best_p_global = _pick_best_with_tiebreak_min(df, "p_test_dev")
+    idx_best_f_global = _pick_best_with_tiebreak_max(df, "score_f1")
+    idx_best_u_global = _pick_best_with_tiebreak_max(df, "score_utility")
+    idx_best_o_global = _pick_best_with_tiebreak_max(df, "score_overall")
+
+    print("\n[GLOBAL BEST CONFIGS]")
 
     def _summarize(label: str, idx: int) -> None:
         row = df.loc[idx]
@@ -252,40 +279,57 @@ def main() -> None:
             "max_steps": row.get("max_steps", None),
         }
         print(f"[BEST {label}]")
-        print("  score_wasserstein:", float(row["score_wasserstein"]))
-        print("  score_ptest:      ", float(row["score_ptest"]))
-        print("  score_f1:         ", float(row["score_f1"]))
-        print("  score_utility:    ", float(row["score_utility"]))
-        print("  score_overall:    ", float(row["score_overall"]))
         print("  knobs:", knobs)
         print("  synth_path:", row.get("synth_path", ""))
+        print("  --- RAW METRICS ---")
+        print(f"  wasserstein_drugs:      {float(row['wasserstein_drugs']):.4f}")
+        print(f"  wasserstein_conditions: {float(row['wasserstein_conditions']):.4f}")
+        print(f"  wasserstein_avg:        {float(row['wasserstein_avg']):.4f}")
+        print(f"  p_test_auc:             {float(row['p_test_auc']):.4f}")
+        print(f"  p_test_accuracy:        {float(row['p_test_accuracy']):.4f}")
+        print(f"  p_test_avg:             {float(row['p_test_avg']):.4f}")
+        print("  --- AGGREGATE SCORES (for overall) ---")
+        print(f"  score_wasserstein: {float(row['score_wasserstein']):.4f}")
+        print(f"  score_ptest:       {float(row['score_ptest']):.4f}")
+        print(f"  score_f1:          {float(row['score_f1']):.4f}")
+        print(f"  score_utility:     {float(row['score_utility']):.4f}")
+        print(f"  score_overall:     {float(row['score_overall']):.4f}")
         print()
 
-    _summarize("WASSERSTEIN", idx_best_w)
-    _summarize("P-TEST", idx_best_p)
-    _summarize("F1", idx_best_f)
-    _summarize("UTILITY", idx_best_u)
-    _summarize("OVERALL", idx_best_o)
+    _summarize("WASSERSTEIN", idx_best_w_global)
+    _summarize("P-TEST", idx_best_p_global)
+    _summarize("F1", idx_best_f_global)
+    _summarize("UTILITY", idx_best_u_global)
+    _summarize("OVERALL", idx_best_o_global)
 
     # ==========================
-    # 5) Interactive console: show raw metrics
+    # 6) Write output CSV
     # ==========================
 
-    # Map user letters to indices + labels
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+
+    print(f"[SAVE] ParamDetect results written to:\n  {out_path}\n")
+
+    # ==========================
+    # 7) Interactive console: show raw metrics for GLOBAL best configs
+    # ==========================
+
     best_map = {
-        "W": ("Wasserstein", idx_best_w),
-        "P": ("P-test", idx_best_p),
-        "F": ("F1", idx_best_f),
-        "U": ("Utility", idx_best_u),
-        "O": ("Overall", idx_best_o),
+        "W": ("Wasserstein", idx_best_w_global),
+        "P": ("P-test", idx_best_p_global),
+        "F": ("F1", idx_best_f_global),
+        "U": ("Utility", idx_best_u_global),
+        "O": ("Overall", idx_best_o_global),
     }
 
-    # Metric columns to display (raw values only)
     raw_metric_cols = [
         "wasserstein_conditions",
         "wasserstein_drugs",
+        "wasserstein_avg",
         "p_test_accuracy",
         "p_test_auc",
+        "p_test_avg",
         "macro_f1_trtr",
         "macro_f1_trsr",
         "macro_f1_tstr",
@@ -298,11 +342,11 @@ def main() -> None:
 
     print("\n[INTERACTIVE MODE]")
     print("Enter one of: {W, P, F, U, O, exit}")
-    print("  W = Best Wasserstein")
-    print("  P = Best P-test")
-    print("  F = Best F1")
-    print("  U = Best Utility")
-    print("  O = Best Overall")
+    print("  W = Best Wasserstein (global)")
+    print("  P = Best P-test (global)")
+    print("  F = Best F1 (global)")
+    print("  U = Best Utility (global)")
+    print("  O = Best Overall (global)")
     print("  exit = quit the program\n")
 
     while True:
@@ -319,7 +363,7 @@ def main() -> None:
         label, idx = best_map[choice]
         row = df.loc[idx]
 
-        print(f"\n===== RAW METRICS for Best {label} =====")
+        print(f"\n===== RAW METRICS for Best {label} (GLOBAL) =====")
         print(f"Config index: {idx}")
         print("Knobs:")
         print("  graph_label:", row.get("graph_label"))
@@ -336,7 +380,6 @@ def main() -> None:
         for col in raw_metric_cols:
             print(f"  {col}: {row[col]}")
         print("=======================================\n")
-
 
 
 if __name__ == "__main__":

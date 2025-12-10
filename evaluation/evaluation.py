@@ -42,7 +42,7 @@ REAL_FACTS_PATH = (
     / "data"
     / "processed"
     / "graphs"
-    / f"samp{SAMPLE_ID}"
+    / f"great5k"
     / "sampled_visit_facts.csv"
 )
 
